@@ -14,8 +14,8 @@ import torch.distributed as dist
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from apex import amp
-from apex.parallel import DistributedDataParallel as DDP
+from torch.cuda.amp import autocast, GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from models.modeling import AttentionResidualsConfig, VisionTransformer, CONFIGS
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
@@ -177,15 +177,16 @@ def train(args, model):
     else:
         scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
 
+    # PyTorch native AMP (replaces apex)
+    scaler = GradScaler() if args.fp16 else None
+
+    # Convert to fp16 if using AMP
     if args.fp16:
-        model, optimizer = amp.initialize(models=model,
-                                          optimizers=optimizer,
-                                          opt_level=args.fp16_opt_level)
-        amp._amp_state.loss_scalers[0]._loss_scale = 2**20
+        model = model.half()
 
     # Distributed training
     if args.local_rank != -1:
-        model = DDP(model, message_size=250000000, gradient_predivide_factor=get_world_size())
+        model = DDP(model, gradient_predivide_factor=get_world_size())
 
     # Train!
     logger.info("***** Running training *****")
@@ -210,7 +211,11 @@ def train(args, model):
         for step, batch in enumerate(epoch_iterator):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
-            loss = model(x, y)
+            if args.fp16:
+                with autocast():
+                    loss = model(x, y)
+            else:
+                loss = model(x, y)
 
             if args.attnres_log_stats and args.local_rank in [-1, 0]:
                 model_for_stats = model.module if hasattr(model, "module") else model
@@ -226,20 +231,24 @@ def train(args, model):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
             if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
+                scaler.scale(loss).backward()
             else:
                 loss.backward()
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 losses.update(loss.item()*args.gradient_accumulation_steps)
                 if args.fp16:
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    scheduler.step()
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                scheduler.step()
-                optimizer.step()
-                optimizer.zero_grad()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    scheduler.step()
                 global_step += 1
 
                 epoch_iterator.set_description(

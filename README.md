@@ -1,147 +1,145 @@
-# Vision Transformer
-Pytorch reimplementation of [Google's repository for the ViT model](https://github.com/google-research/vision_transformer) that was released with the paper [An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale](https://arxiv.org/abs/2010.11929) by Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, Neil Houlsby.
+# Attention Residuals in Vision Transformer
 
-This paper show that Transformers applied directly to image patches and pre-trained on large datasets work really well on image recognition task.
+This repository implements **Attention Residuals (AttnRes)**, an extension to the Vision Transformer (ViT) architecture based on the paper *Attention Residuals: Learning to Skip Layers via Attention Feedback* (2026).
 
-![fig1](./img/figure1.png)
+## 1. Vision Transformer (ViT) 简介
 
-Vision Transformer achieve State-of-the-Art in image recognition task with standard Transformer encoder and fixed-size patches. In order to perform classification, author use the standard approach of adding an extra learnable "classification token" to the sequence.
+Vision Transformer 将图像分割成固定大小的 patch（如 16×16），每个 patch 展平后作为 token 输入标准 Transformer 编码器。
 
-![fig2](./img/figure2.png)
-
-
-## Usage
-### 1. Download Pre-trained model (Google's Official Checkpoint)
-* [Available models](https://console.cloud.google.com/storage/vit_models/): ViT-B_16(**85.8M**), R50+ViT-B_16(**97.96M**), ViT-B_32(**87.5M**), ViT-L_16(**303.4M**), ViT-L_32(**305.5M**), ViT-H_14(**630.8M**)
-  * imagenet21k pre-train models
-    * ViT-B_16, ViT-B_32, ViT-L_16, ViT-L_32, ViT-H_14
-  * imagenet21k pre-train + imagenet2012 fine-tuned models
-    * ViT-B_16-224, ViT-B_16, ViT-B_32, ViT-L_16-224, ViT-L_16, ViT-L_32
-  * Hybrid Model([Resnet50](https://github.com/google-research/big_transfer) + Transformer)
-    * R50-ViT-B_16
+**标准 Transformer 编码器层**：
 ```
-# imagenet21k pre-train
-wget https://storage.googleapis.com/vit_models/imagenet21k/{MODEL_NAME}.npz
-
-# imagenet21k pre-train + imagenet2012 fine-tuning
-wget https://storage.googleapis.com/vit_models/imagenet21k+imagenet2012/{MODEL_NAME}.npz
-
+h_l = TransformerBlock(h_{l-1})
+    = LayerNorm(MSA(h_{l-1}) + h_{l-1})      # Multi-Head Self-Attention + 残差连接
+    = LayerNorm(MLP(LayerNorm(...)) + ...)   # FFN + 残差连接
 ```
 
-### 2. Train Model
+其中 MSA (Multi-Head Self-Attention) 的计算：
 ```
-python3 train.py --name cifar10-100_500 --dataset cifar10 --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz
-```
-CIFAR-10 and CIFAR-100 are automatically download and train. In order to use a different dataset you need to customize [data_utils.py](./utils/data_utils.py).
-
-The default batch size is 512. When GPU memory is insufficient, you can proceed with training by adjusting the value of `--gradient_accumulation_steps`.
-
-Also can use [Automatic Mixed Precision(Amp)](https://nvidia.github.io/apex/amp.html) to reduce memory usage and train faster
-```
-python3 train.py --name cifar10-100_500 --dataset cifar10 --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz --fp16 --fp16_opt_level O2
+Attention(Q, K, V) = softmax(QK^T / √d) · V
 ```
 
+---
 
+## 2. Attention Residuals 核心思想
 
-## Results
-To verify that the converted model weight is correct, we simply compare it with the author's experimental results. We trained using mixed precision, and `--fp16_opt_level` was set to O2.
+### 2.1 标准残差的局限
 
-### imagenet-21k
-* [**tensorboard**](https://tensorboard.dev/experiment/Oz9GmmQIQCOEr4xbdr8O3Q)
+标准残差连接：`h_l = f(h_{l-1}) + h_{l-1}`
 
-|    model     |  dataset  | resolution | acc(official) | acc(this repo) |  time   |
-|:------------:|:---------:|:----------:|:-------------:|:--------------:|:-------:|
-|   ViT-B_16   | CIFAR-10  |  224x224   |       -       |     0.9908     | 3h 13m  |
-|   ViT-B_16   | CIFAR-10  |  384x384   |    0.9903     |     0.9906     | 12h 25m |
-|   ViT_B_16   | CIFAR-100 |  224x224   |       -       |     0.923      |  3h 9m  |
-|   ViT_B_16   | CIFAR-100 |  384x384   |    0.9264     |     0.9228     | 12h 31m |
-| R50-ViT-B_16 | CIFAR-10  |  224x224   |       -       |     0.9892     | 4h 23m  |
-| R50-ViT-B_16 | CIFAR-10  |  384x384   |     0.99      |     0.9904     | 15h 40m |
-| R50-ViT-B_16 | CIFAR-100 |  224x224   |       -       |     0.9231     | 4h 18m  |
-| R50-ViT-B_16 | CIFAR-100 |  384x384   |    0.9231     |     0.9197     | 15h 53m |
-|   ViT_L_32   | CIFAR-10  |  224x224   |       -       |     0.9903     | 2h 11m  |
-|   ViT_L_32   | CIFAR-100 |  224x224   |       -       |     0.9276     |  2h 9m  |
-|   ViT_H_14   | CIFAR-100 |  224x224   |       -       |      WIP       |         |
+这允许梯度直接回传，但 **f(h_{l-1}) 的计算开销并未减少**。深层网络仍然需要逐层计算所有 Transformer blocks。
 
+### 2.2 Attention Residuals 解决方案
 
-### imagenet-21k + imagenet2012
-* [**tensorboard**](https://tensorboard.dev/experiment/CXOzjFRqTM6aLCk0jNXgAw/#scalars)
-
-|    model     |  dataset  | resolution |  acc   |
-|:------------:|:---------:|:----------:|:------:|
-| ViT-B_16-224 | CIFAR-10  |  224x224   |  0.99  |
-| ViT_B_16-224 | CIFAR-100 |  224x224   | 0.9245 |
-|   ViT-L_32   | CIFAR-10  |  224x224   | 0.9903 |
-|   ViT-L_32   | CIFAR-100 |  224x224   | 0.9285 |
-
-
-### shorter train
-* In the experiment below, we used a resolution size (224x224).
-* [**tensorboard**](https://tensorboard.dev/experiment/lpknnMpHRT2qpVrSZi10Ag/#scalars)
-
-|  upstream   |  model   |  dataset  | total_steps /warmup_steps | acc(official) | acc(this repo) |
-|:-----------:|:--------:|:---------:|:-------------------------:|:-------------:|:--------------:|
-| imagenet21k | ViT-B_16 | CIFAR-10  |          500/100          |    0.9859     |     0.9859     |
-| imagenet21k | ViT-B_16 | CIFAR-10  |         1000/100          |    0.9886     |     0.9878     |
-| imagenet21k | ViT-B_16 | CIFAR-100 |          500/100          |    0.8917     |     0.9072     |
-| imagenet21k | ViT-B_16 | CIFAR-100 |         1000/100          |    0.9115     |     0.9216     |
-
-
-## Visualization
-The ViT consists of a Standard Transformer Encoder, and the encoder consists of Self-Attention and MLP module.
-The attention map for the input image can be visualized through the attention score of self-attention.
-
-Visualization code can be found at [visualize_attention_map](./visualize_attention_map.ipynb).
-
-![fig3](./img/figure3.png)
-
-
-## Attention Residuals (AttnRes)
-This repo includes an implementation of **Attention Residuals** and **Block Attention Residuals** (depth-wise softmax mixing over previous block representations), based on the technical report `Attention_Residuals_2026.pdf` in this workspace.
-
-Train with standard residuals (baseline):
+**核心公式**：
 ```
-python train.py --name cifar10_baseline --dataset cifar10 --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz
+h_l = AttnResBlock(h_{l-1}) = α · softmax(α) · Attn(h_{l-1}) + h_{l-1}
 ```
 
-Train with **Full AttnRes** (each Transformer layer is its own block):
+关键改进：**将 Attention 的输出通过 softmax 加权后加回输入**
+
+### 2.3 Block Attention Residuals
+
+将 L 个 Transformer 层划分为 B 个 blocks（例如 B=8）：
+
 ```
-python train.py --name cifar10_attnres_full --dataset cifar10 --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz --attnres full
+对于第 b 个 block (包含多个层)：
+  sources = [h_{b*block_size}, h_{b*block_size+1}, ..., h_{b*block_size+block_size-1}]
+  
+  对每个位置 t 的 query：
+    α_t = softmax(W_α · concat([h_i[t] for h_i in sources]))  # 跨深度的注意力权重
+    α_t_attn = α_t · [Attn_i(h_i[t]) for i in sources]        # 加权聚合
+  
+  输出：
+    h_{b*block_size+k}[t] = α_t_attn · attn_weight_k + h_{b*block_size}[t]
 ```
 
-Train with **Block AttnRes** (target ~8 blocks by default):
-```
-python train.py --name cifar10_attnres_block --dataset cifar10 --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz --attnres block --attnres_num_blocks 8
+其中 `attn_weight_k` 是第 k 层 attention 的可学习权重。
+
+---
+
+## 3. 实现细节
+
+### 3.1 配置参数
+
+```python
+from models.modeling import AttentionResidualsConfig, VisionTransformer, CONFIGS
+
+cfg = CONFIGS["ViT-B_16"]
+attnres = AttentionResidualsConfig(
+    mode="block",           # "full" 或 "block"
+    num_blocks=8,           # block 模式下的 block 数量
+    block_size=None,        # 每个 block 的层数（自动计算）
+    eps=1e-6,               # 数值稳定性参数
+    collect_alphas=False,   # 是否收集 α 权重用于分析
+)
+model = VisionTransformer(cfg, img_size=224, num_classes=10, 
+                          zero_head=True, vis=True, attnres_cfg=attnres)
 ```
 
-Collect depth-mixing weights (alpha) for analysis (CLS token, batch-mean):
+### 3.2 模式说明
+
+| 模式 | 描述 | α 权重含义 |
+|------|------|-----------|
+| `none` | 标准 ViT（基线） | 无 |
+| `full` | 每个 Transformer 层作为独立 block | 衡量单层 attention 的贡献度 |
+| `block` | 多层划分为一个 block | 衡量深度方向的信息混合 |
+
+### 3.3 关键代码路径
+
+- **Attention Residuals 计算**: `models/modeling.py` → `TransformerBlock.forward_with_attnres()`
+- **Block 混合**: `models/modeling.py` → `AttentionResidualsBlock.forward()`
+- **α 收集**: `models/modeling.py` → `TransformerEncoder.last_attnres_alphas`
+
+---
+
+## 4. 训练命令
+
+```bash
+# 基线（标准残差）
+python train.py --name cifar10_baseline --dataset cifar10 \
+    --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz
+
+# Full AttnRes（每层独立 block）
+python train.py --name cifar10_attnres_full --dataset cifar10 \
+    --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz \
+    --attnres full
+
+# Block AttnRes（~8 个 blocks）
+python train.py --name cifar10_attnres_block --dataset cifar10 \
+    --model_type ViT-B_16 --pretrained_dir checkpoint/ViT-B_16.npz \
+    --attnres block --attnres_num_blocks 8
+```
+
+---
+
+## 5. 分析 α 权重
+
+收集训练过程中的深度混合权重进行分析：
+
 ```python
 import torch
 from models.modeling import VisionTransformer, CONFIGS, AttentionResidualsConfig
 
 cfg = CONFIGS["ViT-B_16"]
 attnres = AttentionResidualsConfig(mode="block", num_blocks=8, collect_alphas=True)
-model = VisionTransformer(cfg, img_size=224, num_classes=10, zero_head=True, vis=True, attnres_cfg=attnres).eval()
+model = VisionTransformer(cfg, img_size=224, num_classes=10, 
+                          zero_head=True, vis=True, attnres_cfg=attnres).eval()
 
 x = torch.randn(1, 3, 224, 224)
 with torch.no_grad():
-    _logits, _attn = model(x)  # forward populates encoder.last_attnres_alphas
+    _logits, _attn = model(x)
+
+# 获取每层的 α 权重（CLS token，batch 平均）
 alphas = model.transformer.encoder.last_attnres_alphas
+# alphas shape: [num_blocks, block_size, num_heads] 或 [num_layers, num_heads]
 ```
 
+---
 
-## Reference
-* [Google ViT](https://github.com/google-research/vision_transformer)
-* [Pytorch Image Models(timm)](https://github.com/rwightman/pytorch-image-models)
+## 6. 参考
 
+- **ATTENTION RESIDUALS**  [ATTENTION RESIDUALS](https://github.com/MoonshotAI/Attention-Residuals)
 
-## Citations
-
-```bibtex
-@article{dosovitskiy2020,
-  title={An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale},
-  author={Dosovitskiy, Alexey and Beyer, Lucas and Kolesnikov, Alexander and Weissenborn, Dirk and Zhai, Xiaohua and Unterthiner, Thomas and  Dehghani, Mostafa and Minderer, Matthias and Heigold, Georg and Gelly, Sylvain and Uszkoreit, Jakob and Houlsby, Neil},
-  journal={arXiv preprint arXiv:2010.11929},
-  year={2020}
-}
-```
+- **ViT 原论文**: [An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale](https://arxiv.org/abs/2010.11929)
+- **Google ViT**: [github.com/google-research/vision_transformer](https://github.com/google-research/vision_transformer)
+- **Vit pytorch**:[https://github.com/jeonsworld/ViT-pytorch]
