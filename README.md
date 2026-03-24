@@ -1,6 +1,6 @@
 # Attention Residuals in Vision Transformer
 
-This repository implements **Attention Residuals (AttnRes)**, an extension to the Vision Transformer (ViT) architecture based on the paper *Attention Residuals: Learning to Skip Layers via Attention Feedback* (2026).
+This repository implements **Attention Residuals (AttnRes)**, an extension to the Vision Transformer (ViT) architecture based on the paper *Attention Residuals-Kimi Team*
 
 ## 1. Vision Transformer (ViT) 简介
 
